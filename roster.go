@@ -108,7 +108,7 @@ func (r *Roster) sign(sk string) (nostr.Event, error) {
 	ev := nostr.Event{
 		Kind:      KindRoster,
 		CreatedAt: nostr.Now(),
-		Tags:      nostr.Tags{{"d", r.Network}, {"v", fmt.Sprint(r.Version)}},
+		Tags:      nostr.Tags{},
 		Content:   string(b),
 	}
 	return ev, ev.Sign(sk)
@@ -125,9 +125,6 @@ func acceptRoster(ev *nostr.Event, network string, admins []string, cur *Roster,
 	}
 	if ok, err := ev.CheckSignature(); !ok || err != nil {
 		return nil, fmt.Errorf("署名が不正")
-	}
-	if ev.Tags.GetD() != network {
-		return nil, fmt.Errorf("ネットワーク違い")
 	}
 	if ev.CreatedAt.Time().After(now.Add(10 * time.Minute)) {
 		return nil, fmt.Errorf("時刻が未来すぎる")

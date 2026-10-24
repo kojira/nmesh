@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,8 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
+		"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 const usage = `nmesh — Nostr で見つけ合う WireGuard メッシュ VPN
@@ -30,10 +30,10 @@ const usage = `nmesh — Nostr で見つけ合う WireGuard メッシュ VPN
   id                           この端末の公開鍵を表示
   admin create <端末名> [--cidr 10.77.0.0/16] [--domain mesh]
                                新しいネットワークを作り、自分を管理者・メンバーにする
-  admin add <npub|hex> <端末名> 名簿に端末を追加して配信
-  admin remove <端末名>         名簿から外して配信
+  admin add <npub|hex> <端末名> 名簿に追加し、招待文字列を表示（鍵を新しい世代に）
+  admin remove <端末名>         名簿から外す（鍵を新しい世代に）
   admin show                   名簿を表示
-  join <ネットワークID> <管理者npub>  既存のネットワークに参加する設定
+  join <招待文字列>              admin add が出した招待で参加する
   up [--mode userspace|tun]    起動（userspace は root 不要、tun は root 必要）
   status                       接続状態
   ping <端末名|IP>              メッシュ内へ ping（userspace のとき）
@@ -105,22 +105,37 @@ func run(dir string, args []string) error {
 	case "admin":
 		return adminCmd(dir, args[1:])
 	case "join":
-		if len(args) != 3 {
-			return errors.New("nmesh join <ネットワークID> <管理者npub>")
+		if len(args) != 2 {
+			return errors.New("nmesh join <招待文字列>")
 		}
 		st, err := loadState(dir)
 		if err != nil {
 			return err
 		}
-		admin, err := decodePub(args[2])
+		iv, err := parseInvite(args[1])
 		if err != nil {
 			return err
 		}
-		st.Cfg.Network, st.Cfg.Admins = args[1], []string{admin}
+		if iv.For != "" && iv.For != st.Pub {
+			return errors.New("この招待は別の端末向けです")
+		}
+		st.Cfg.Network, st.Cfg.Admins = iv.Net, []string{iv.Admin}
+		if len(iv.Relays) > 0 {
+			st.Cfg.Relays = iv.Relays
+		}
+		kr := &keyring{dir: dir}
+		if err := kr.update(time.Now(), func(kf *keyFile) error {
+			if !addGen(kf, chainState{Gen: iv.Gen, T: iv.T, K: iv.K}, time.Now()) {
+				return errors.New("この招待より新しい鍵を既に持っています")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		if err := st.saveConfig(); err != nil {
 			return err
 		}
-		fmt.Printf("設定しました。管理者に次を伝えて追加してもらってください:\n  nmesh admin add %s <端末名>\n", npub(st.Pub))
+		fmt.Println("参加の設定をしました。nmesh up で起動してください。")
 		return nil
 	case "up":
 		fs := flag.NewFlagSet("up", flag.ExitOnError)
@@ -223,6 +238,14 @@ func up(st *State) error {
 		}
 		json.NewEncoder(w).Encode(out)
 	})
+	mux.HandleFunc("/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST", 405)
+			return
+		}
+		m.reload(r.Context())
+		w.Write([]byte("ok"))
+	})
 	go http.Serve(l, mux)
 	return m.Run(ctx, mk)
 }
@@ -311,7 +334,14 @@ func adminCmd(dir string, args []string) error {
 		}
 		r.Members = keep
 	case "show":
-		fmt.Printf("ネットワークID: %s  名前: %s  範囲: %s  ドメイン: %s  版: %d\n管理者: %s\n", r.Network, r.Name, r.CIDR, r.Domain, r.Version, npub(r.Admins[0]))
+		gen := -1
+		kr := &keyring{dir: dir}
+		if kr.update(time.Now(), nil) == nil {
+			if c, ok := kr.current(); ok {
+				gen = c.Gen
+			}
+		}
+		fmt.Printf("ネットワークID: %s  名前: %s  範囲: %s  ドメイン: %s  版: %d  鍵の世代: %d\n管理者: %s\n", r.Network, r.Name, r.CIDR, r.Domain, r.Version, gen, npub(r.Admins[0]))
 		for _, x := range r.Members {
 			fmt.Printf("  %-16s %-14s %s\n", x.Name, x.IP, npub(x.Pubkey))
 		}
@@ -324,29 +354,45 @@ func adminCmd(dir string, args []string) error {
 	if err != nil {
 		return err
 	}
+	// 出入りがあればネットワーク鍵を新しい世代にする（外された端末は新しい鍵を受け取れない）
+	kr := &keyring{dir: dir}
+	var newGen chainState
+	if err := kr.update(time.Now(), func(kf *keyFile) error {
+		g := 0
+		for _, c := range kf.Chains {
+			if c.Gen >= g {
+				g = c.Gen + 1
+			}
+		}
+		k := randKey()
+		newGen = chainState{Gen: g, T: minuteOf(time.Now()) - 1, K: hex.EncodeToString(k[:])}
+		addGen(kf, newGen, time.Now())
+		return nil
+	}); err != nil {
+		return err
+	}
 	if err := saveJSON(rp, r, 0600); err != nil {
 		return err
 	}
-	saveJSON(filepath.Join(dir, "roster-event.json"), ev, 0600)
-	pool := nostr.NewSimplePool(context.Background(), nostr.WithAuthHandler(func(ctx context.Context, e nostr.RelayEvent) error {
-		return e.Event.Sign(st.Keys.NostrSK)
-	}))
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	ok := 0
-	for res := range pool.PublishMany(ctx, st.Cfg.Relays, ev) {
-		if res.Error != nil {
-			fmt.Printf("  配信失敗 %s: %v\n", res.RelayURL, res.Error)
-		} else {
-			ok++
-		}
+	if err := saveJSON(filepath.Join(dir, "roster-event.json"), ev, 0600); err != nil {
+		return err
 	}
-	fmt.Printf("名簿 v%d を %d/%d のリレーへ配信しました（ネットワークID: %s）\n", r.Version, ok, len(st.Cfg.Relays), r.Network)
-	if args[0] == "create" {
-		fmt.Printf("参加する端末では:\n  nmesh init\n  nmesh join %s %s\n", r.Network, npub(st.Pub))
+	fmt.Printf("名簿 v%d を保存しました（メンバー %d、ネットワーク鍵 世代 %d）\n", r.Version, len(r.Members), newGen.Gen)
+	if args[0] == "add" {
+		cur, _ := kr.current()
+		pub, _ := decodePub(args[1])
+		iv := invite{V: 1, Net: r.Network, Admin: st.Pub, For: pub, Relays: st.Cfg.Relays, Gen: cur.Gen, T: cur.T, K: cur.K}
+		fmt.Printf("\n追加する端末で、次を実行してください（Nostr を通さず、安全な方法で渡してください）:\n  nmesh join %s\n\n", iv)
 	}
-	if ok == 0 {
-		return errors.New("どのリレーにも配信できませんでした")
+	// 起動中のデーモンに知らせる（デーモンがほかのメンバーへ合図を送る）
+	c := http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return net.Dial("unix", filepath.Join(dir, "ctl.sock"))
+	}}, Timeout: 20 * time.Second}
+	if resp, err := c.Post("http://nmesh/reload", "", nil); err == nil {
+		resp.Body.Close()
+		fmt.Println("起動中のデーモンに反映し、メンバーへ更新の合図を送りました。")
+	} else if args[0] != "create" {
+		fmt.Println("デーモンが起動していません。nmesh up すると、メンバーへ更新が届きます。")
 	}
 	_ = netip.Addr{}
 	return nil

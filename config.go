@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	KindRoster   = 31777 // パラメータ付き置換可能（d=ネットワークID）、管理者が署名
-	KindAnnounce = 21777 // エフェメラル、相手ごとに NIP-44 暗号化
+	KindRoster   = 21779 // 名簿（管理者の署名）。リレーには直接出さず、包みの中に入れて運ぶ
+	KindAnnounce = 21777 // 外側の包み（エフェメラル）
 )
 
 var defaultRelays = []string{"wss://r.kojira.io", "wss://x.kojira.io", "wss://n.kojira.io"}
