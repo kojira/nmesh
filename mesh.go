@@ -50,6 +50,7 @@ type peer struct {
 	convKey    [32]byte
 	handshake  time.Time
 	rx, tx     int64
+	punchRx    int
 }
 
 type Mesh struct {
@@ -222,6 +223,7 @@ func (m *Mesh) candidates() []string {
 	for _, ap := range ext {
 		add(ap)
 	}
+	src6 := defaultSrc6()
 	ifaces, _ := net.Interfaces()
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
@@ -241,13 +243,26 @@ func (m *Mesh) candidates() []string {
 			if ip.IsLinkLocalUnicast() || ip.IsLoopback() || cgnat.Contains(ip) || tsv6.Contains(ip) || (meshPfx.IsValid() && meshPfx.Contains(ip)) {
 				continue
 			}
-			if ip.Is6() && !ip.IsGlobalUnicast() {
+			if ip.Is6() && (!ip.IsGlobalUnicast() || (ip.IsGlobalUnicast() && !ip.IsPrivate() && ip != src6)) {
+				// IPv6 は「外へ出るときの送り元」だけを載せる。一時アドレスが多数あると、
+				// 受けたアドレスと返信の送り元が食い違い、相手側のルーターに捨てられるため。
 				continue
 			}
 			add(netip.AddrPortFrom(ip, port))
 		}
 	}
 	return out
+}
+
+// defaultSrc6 は外向き IPv6 の送り元アドレス（パケットは送らない）。
+func defaultSrc6() netip.Addr {
+	c, err := net.Dial("udp6", "[2001:4860:4860::8888]:53")
+	if err != nil {
+		return netip.Addr{}
+	}
+	defer c.Close()
+	ap, _ := netip.ParseAddrPort(c.LocalAddr().String())
+	return ap.Addr()
 }
 
 func (m *Mesh) sendAnnounce(ctx context.Context, p *peer, reply bool) {
@@ -417,6 +432,7 @@ func (m *Mesh) handlePunch(b []byte, from netip.AddrPort) {
 		return
 	}
 	typ := b[8]
+	p.punchRx++
 	_, known := p.confirmed[from]
 	p.confirmed[from] = time.Now()
 	nonce := append([]byte(nil), b[41:49]...)
@@ -546,6 +562,8 @@ type peerStatus struct {
 	State     string `json:"state"`
 	Endpoint  string `json:"endpoint,omitempty"`
 	Handshake string `json:"last_handshake,omitempty"`
+	PunchRx   int    `json:"punch_rx"`
+	Cands     int    `json:"cands"`
 	Rx        int64  `json:"rx_bytes"`
 	Tx        int64  `json:"tx_bytes"`
 }
@@ -572,7 +590,7 @@ func (m *Mesh) writeStatus() {
 		s.External = append(s.External, e.String())
 	}
 	for _, p := range m.peers {
-		ps := peerStatus{Name: p.name, IP: p.ip.String(), Pubkey: p.pub, Rx: p.rx, Tx: p.tx}
+		ps := peerStatus{Name: p.name, IP: p.ip.String(), Pubkey: p.pub, Rx: p.rx, Tx: p.tx, PunchRx: p.punchRx, Cands: len(p.cands)}
 		switch {
 		case p.wgPub == "":
 			ps.State = "告知待ち"

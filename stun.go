@@ -167,22 +167,28 @@ func (s *stunClient) query(servers []string, timeout time.Duration) []netip.Addr
 			}
 		}
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	deadline := time.Now().Add(timeout)
 	seen := map[netip.AddrPort]bool{}
 	var out []netip.AddrPort
-wait:
-	for _, r := range reqs {
-		select {
-		case ap := <-r.ch:
-			ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-			if !seen[ap] {
-				seen[ap] = true
-				out = append(out, ap)
+	got := make([]bool, len(reqs))
+	for remaining := len(reqs); remaining > 0 && time.Now().Before(deadline); {
+		for i, r := range reqs {
+			if got[i] {
+				continue
 			}
-		case <-timer.C:
-			break wait
+			select {
+			case ap := <-r.ch:
+				got[i] = true
+				remaining--
+				ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+				if !seen[ap] {
+					seen[ap] = true
+					out = append(out, ap)
+				}
+			default:
+			}
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	s.mu.Lock()
 	for _, r := range reqs {
