@@ -36,6 +36,8 @@ type Config struct {
 	Expose     []Expose `json:"expose"`      // userspace: メッシュから受ける転送
 	TunName    string   `json:"tun_name"`    // tun: Linux のインターフェース名
 	MTU        int      `json:"mtu"`
+	DNS        string   `json:"dns"`         // メッシュ名の DNS 待ち受け（例 127.0.0.1:53053、空なら無効）
+	DNSInstall bool     `json:"dns_install"` // OS にこのドメインだけの問い合わせ先として登録する（root が必要）
 }
 
 type Keys struct {
@@ -105,7 +107,7 @@ func initState(dir string) (*State, error) {
 	}
 	cp := filepath.Join(dir, "config.json")
 	if _, err := os.Stat(cp); err != nil {
-		c := Config{Relays: defaultRelays, Stun: defaultStun, ListenPort: 41820, Mode: "userspace", Socks: "127.0.0.1:1080", MTU: 1280, TunName: "nmesh0"}
+		c := Config{Relays: defaultRelays, Stun: defaultStun, ListenPort: 41820, Mode: "userspace", Socks: "127.0.0.1:1080", MTU: 1280, TunName: "nmesh0", DNS: "127.0.0.1:53053"}
 		if err := saveJSON(cp, c, 0600); err != nil {
 			return nil, err
 		}

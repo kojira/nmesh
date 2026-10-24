@@ -1014,6 +1014,21 @@ func (m *Mesh) Run(ctx context.Context, mk func(m *Mesh, me *Member) (tun.Device
 		return err
 	}
 	m.tunDev = td
+	if cfg.DNS != "" {
+		if err := m.startDNS(cfg.DNS); err != nil {
+			m.logf("DNS を起動できません: %v", err)
+		} else if cfg.DNSInstall {
+			host, ps, _ := net.SplitHostPort(cfg.DNS)
+			port, _ := strconv.Atoi(ps)
+			ifn, _ := td.Name()
+			if undo, err := installResolver(m.roster.Domain, host, port, ifn); err != nil {
+				m.logf("DNS を OS に登録できません: %v", err)
+			} else {
+				m.logf("OS に登録: *.%s → %s", m.roster.Domain, cfg.DNS)
+				defer undo()
+			}
+		}
+	}
 	m.dev = device.NewDevice(td, m.bind, device.NewLogger(device.LogLevelError, "wg: "))
 	if err := m.dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n", m.st.Keys.WgSK, cfg.ListenPort)); err != nil {
 		return fmt.Errorf("WireGuard 起動失敗（UDP %d が使用中？）: %w", cfg.ListenPort, err)

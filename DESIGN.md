@@ -267,8 +267,13 @@ kojira の条件：
 - ホールパンチのパケットに npub を平文で載せていた。そのやりとり限りの鍵から作る ID に変えた。
 
 **まだ残っていること**
-- DNS（作りかけ）
+- DNS：OS への登録（`dns_install`、Mac は /etc/resolver、Linux は resolvectl）。root が必要なため、まだ試していない
 - tun モード
 - Tailscale との同時利用の確認
 - Cloudflare 連携
 - 常駐化（kojira の指示で最後に回す）
+
+### DNS（2026-10-24）
+- `dns`（既定 127.0.0.1:53053）で、メッシュの名前だけに答える。UDP と TCP。名簿にない名前は NXDOMAIN、ドメイン外は REFUSED を返す。
+- dig で確認した：mini-b.mesh → 10.77.0.2、大文字小文字の違いは無視、存在しない名前は NXDOMAIN、example.com は REFUSED、TCP でも引ける。
+- 単体テストあり。
